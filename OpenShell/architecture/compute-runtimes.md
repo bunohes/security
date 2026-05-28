@@ -1,0 +1,86 @@
+# Compute Runtimes
+
+Compute runtimes create, stop, delete, and watch sandbox workloads for the
+gateway. They do not replace sandbox policy enforcement. Every runtime starts a
+workload that runs the `openshell-sandbox` supervisor, and the supervisor
+enforces the sandbox contract locally.
+
+## Driver Contract
+
+Each runtime receives a sandbox spec from the gateway and is responsible for:
+
+- Selecting the sandbox image.
+- Injecting sandbox identity and gateway callback configuration.
+- Supplying TLS or secret material for supervisor callbacks.
+- Providing the supervisor binary or image in the workload.
+- Reporting lifecycle and platform events back to the gateway.
+- Cleaning up runtime-owned resources.
+
+Drivers own runtime-specific platform event interpretation. When an event should
+drive client provisioning UI, the driver attaches the shared
+`openshell.progress.*` metadata defined in `openshell-core` instead of requiring
+clients to parse Kubernetes reasons, VM cache states, or other driver-local
+reason strings.
+
+## Runtime Summary
+
+| Runtime | Best fit | Sandbox boundary | Notes |
+|---|---|---|---|
+| Docker | Local development with Docker available. | Container plus nested sandbox namespace. | Uses host networking so loopback gateway endpoints work from the supervisor. |
+| Podman | Rootless or single-machine deployments. | Container plus nested sandbox namespace. | Uses the Podman REST API, OCI image volumes, and CDI GPU devices when available. |
+| Kubernetes | Cluster deployment through Helm. | Pod plus nested sandbox namespace. | Uses Kubernetes API objects, service accounts, secrets, PVC-backed workspace storage, and GPU resources. |
+| VM | Experimental microVM isolation. | Per-sandbox libkrun VM. | Gateway spawns `openshell-driver-vm` as a subprocess over a private, state-local Unix socket. The VM driver boots a cached bootstrap `rootfs.ext4`, prepares requested OCI images inside a bootstrap VM with `umoci`, attaches the prepared image disk read-only, and gives each sandbox a writable `overlay.ext4` for merged-root changes and runtime material. The driver persists each accepted launch request beside the overlay and restarts those VMs on driver startup without recreating the overlay. |
+
+Per-sandbox CPU and memory values currently enter the driver layer through
+template resource limits. Docker and Podman apply them as runtime limits.
+Kubernetes mirrors each limit into the matching request. VM accepts the fields
+but currently ignores them.
+
+VM runtime state paths are derived only from driver-validated sandbox IDs
+matching `[A-Za-z0-9._-]{1,128}`. The gateway-owned VM driver socket uses a
+private `run/` directory plus Unix peer UID/PID checks. Standalone
+unauthenticated TCP mode is disabled unless explicitly enabled for local
+development.
+
+Runtime-specific implementation notes belong in the driver crate README:
+
+- `crates/openshell-driver-docker/README.md`
+- `crates/openshell-driver-podman/README.md`
+- `crates/openshell-driver-kubernetes/README.md`
+- `crates/openshell-driver-vm/README.md`
+
+## Supervisor Delivery
+
+The supervisor must be available inside each sandbox workload:
+
+| Runtime | Delivery model |
+|---|---|
+| Docker | Bind-mounted local supervisor binary, or a binary extracted from the configured supervisor image. |
+| Podman | Read-only OCI image volume containing the supervisor binary. |
+| Kubernetes | Sandbox pod image or pod template configuration. |
+| VM | Embedded in the guest rootfs bundle. |
+
+Driver-controlled environment variables must override sandbox image or template
+values for sandbox ID, sandbox name, gateway endpoint, relay socket path, TLS
+paths, and command metadata.
+
+## Images
+
+The gateway image and Helm chart are built from this repository. Sandbox images
+are maintained separately in the OpenShell Community repository or supplied by
+users.
+
+Custom sandbox images must include the agent runtime and any system
+dependencies, but they should not need to include the gateway. GPU-capable
+images must include the user-space libraries required by the workload. The
+runtime still owns GPU device injection.
+
+## Deployment Shape
+
+Kubernetes deployments use the Helm chart under `deploy/helm/openshell`.
+Standalone local deployments start the gateway with a selected runtime such as
+Docker, Podman, or VM. The CLI can register multiple gateways and switch between
+them without changing the sandbox architecture.
+
+When runtime infrastructure changes, validate the relevant sandbox e2e path and
+update the matching driver README if a maintainer-facing constraint changes.

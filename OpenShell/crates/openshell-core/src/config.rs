@@ -1,0 +1,757 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Configuration management for `OpenShell` components.
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::str::FromStr;
+
+// ── Public default constants ────────────────────────────────────────────
+//
+// Canonical source for default values used across multiple crates.
+// Clap `default_value_t` annotations and runtime fallbacks should
+// reference these constants instead of hardcoding literals.
+
+/// Default SSH port inside sandbox containers.
+pub const DEFAULT_SSH_PORT: u16 = 2222;
+
+/// Default gateway server port.
+pub const DEFAULT_SERVER_PORT: u16 = 17670;
+
+/// Default container stop timeout in seconds (SIGTERM → SIGKILL).
+pub const DEFAULT_STOP_TIMEOUT_SECS: u32 = 10;
+
+/// Default Docker bridge network name for local sandboxes.
+pub const DEFAULT_DOCKER_NETWORK_NAME: &str = "openshell-docker";
+
+/// Default domain used for browser-facing sandbox service URLs.
+pub const DEFAULT_SERVICE_ROUTING_DOMAIN: &str = "openshell.localhost";
+
+/// Default OCI image for the openshell-sandbox supervisor binary.
+pub const DEFAULT_SUPERVISOR_IMAGE: &str = "ghcr.io/nvidia/openshell/supervisor:latest";
+
+/// CDI device identifier for requesting all NVIDIA GPUs.
+pub const CDI_GPU_DEVICE_ALL: &str = "nvidia.com/gpu=all";
+
+/// Compute backends the gateway can orchestrate sandboxes through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeDriverKind {
+    Kubernetes,
+    Vm,
+    Docker,
+    Podman,
+}
+
+impl ComputeDriverKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Kubernetes => "kubernetes",
+            Self::Vm => "vm",
+            Self::Docker => "docker",
+            Self::Podman => "podman",
+        }
+    }
+}
+
+impl fmt::Display for ComputeDriverKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ComputeDriverKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "kubernetes" => Ok(Self::Kubernetes),
+            "vm" => Ok(Self::Vm),
+            "docker" => Ok(Self::Docker),
+            "podman" => Ok(Self::Podman),
+            other => Err(format!(
+                "unsupported compute driver '{other}'. expected one of: kubernetes, vm, docker, podman"
+            )),
+        }
+    }
+}
+
+/// Auto-detect the appropriate compute driver based on the runtime environment.
+///
+/// Priority order: Kubernetes → Podman → Docker.
+/// VM is never auto-detected (requires explicit `--drivers vm`).
+///
+/// Returns the first driver where the environment check passes.
+/// Returns `None` if no compatible driver is found.
+pub fn detect_driver() -> Option<ComputeDriverKind> {
+    // Kubernetes: check for KUBERNETES_SERVICE_HOST env var (set inside pods)
+    if std::env::var_os("KUBERNETES_SERVICE_HOST").is_some() {
+        return Some(ComputeDriverKind::Kubernetes);
+    }
+
+    // Podman: check if podman binary is available
+    if is_binary_available("podman") {
+        return Some(ComputeDriverKind::Podman);
+    }
+
+    // Docker: check if the CLI is available or a local Docker socket exists.
+    if is_docker_available() {
+        return Some(ComputeDriverKind::Docker);
+    }
+
+    None
+}
+
+/// Check if a binary is available on the system PATH.
+fn is_binary_available(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn is_docker_available() -> bool {
+    is_binary_available("docker") || docker_socket_available()
+}
+
+fn docker_socket_available() -> bool {
+    docker_socket_candidates()
+        .iter()
+        .any(|path| is_unix_socket(path))
+}
+
+fn docker_socket_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(host) = std::env::var("DOCKER_HOST")
+        && let Some(path) = docker_host_unix_socket_path(&host)
+    {
+        candidates.push(path);
+    }
+
+    candidates.push(PathBuf::from("/var/run/docker.sock"));
+
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".docker/run/docker.sock"));
+    }
+
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        candidates.push(PathBuf::from(runtime_dir).join("docker.sock"));
+    }
+
+    candidates
+}
+
+fn docker_host_unix_socket_path(host: &str) -> Option<PathBuf> {
+    let path = host.trim().strip_prefix("unix://")?;
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+#[cfg(unix)]
+fn is_unix_socket(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_socket())
+}
+
+#[cfg(not(unix))]
+fn is_unix_socket(path: &Path) -> bool {
+    let _ = path;
+    false
+}
+
+/// Server configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    /// Address to bind the server to.
+    #[serde(default = "default_bind_address")]
+    pub bind_address: SocketAddr,
+
+    /// Address to bind the unauthenticated health endpoint to.
+    ///
+    /// When `None`, the dedicated health listener is disabled.
+    #[serde(default)]
+    pub health_bind_address: Option<SocketAddr>,
+
+    /// Address to bind the Prometheus metrics endpoint to.
+    ///
+    /// When `None`, the dedicated metrics listener is disabled.
+    #[serde(default)]
+    pub metrics_bind_address: Option<SocketAddr>,
+
+    /// Additional bind addresses that serve the same multiplexed gRPC/HTTP
+    /// surface as `bind_address`.
+    ///
+    /// Compute drivers may register extra listeners during startup so that
+    /// sandbox workloads can call back into the gateway over an interface
+    /// that the operator-supplied `bind_address` does not expose.
+    #[serde(default)]
+    pub extra_bind_addresses: Vec<SocketAddr>,
+
+    /// Log level (trace, debug, info, warn, error).
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+
+    /// TLS configuration.  When `None`, the server listens on plaintext HTTP.
+    pub tls: Option<TlsConfig>,
+
+    /// OIDC configuration. When `Some`, the server validates Bearer JWTs.
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
+
+    /// Gateway user authentication behavior.
+    #[serde(default)]
+    pub auth: GatewayAuthConfig,
+
+    /// mTLS user authentication configuration. When enabled, a verified TLS
+    /// client certificate can authenticate CLI/SDK callers as a
+    /// `Principal::User`. This is for local single-user gateways only;
+    /// sandbox identity is always carried by gateway-minted sandbox JWTs.
+    #[serde(default)]
+    pub mtls_auth: MtlsAuthConfig,
+
+    /// Gateway-minted sandbox JWT configuration. When `Some`, the gateway
+    /// loads the signing key from disk and accepts gateway-issued sandbox
+    /// JWTs as `Principal::Sandbox`. Required for the per-sandbox identity
+    /// flow (issue #1354).
+    #[serde(default)]
+    pub gateway_jwt: Option<GatewayJwtConfig>,
+
+    /// Database URL for persistence.
+    pub database_url: String,
+
+    /// Compute drivers configured for the gateway.
+    ///
+    /// The config shape allows multiple drivers so the gateway can evolve
+    /// toward multi-backend routing. Current releases require exactly one
+    /// configured driver.
+    #[serde(default)]
+    pub compute_drivers: Vec<ComputeDriverKind>,
+
+    /// TTL for SSH session tokens, in seconds. 0 disables expiry.
+    #[serde(default = "default_ssh_session_ttl_secs")]
+    pub ssh_session_ttl_secs: u64,
+
+    /// Browser-facing sandbox service routing configuration.
+    #[serde(default)]
+    pub service_routing: ServiceRoutingConfig,
+}
+
+/// Browser-facing sandbox service routing configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceRoutingConfig {
+    /// Base domains accepted for `sandbox--service.<domain>` routes.
+    /// The first domain is used when the gateway prints endpoint URLs.
+    #[serde(default = "default_service_routing_domains")]
+    pub base_domains: Vec<String>,
+
+    /// Enable TLS-enabled loopback gateway listeners to also accept plaintext
+    /// HTTP for sandbox service hostnames.
+    #[serde(default = "default_enable_loopback_service_http")]
+    pub enable_loopback_service_http: bool,
+}
+
+/// TLS configuration.
+///
+/// Two modes are supported:
+/// - **HTTPS with optional mTLS** (`client_ca_path = Some`):
+///   Client certificates are validated against the given CA when presented,
+///   but never required.  Clients may connect with or without a certificate.
+/// - **HTTPS-only** (`client_ca_path = None`):
+///   Server-side TLS only; no client certificates are requested.
+///
+/// In both modes, authentication is handled at the application layer
+/// (e.g. OIDC bearer tokens).  mTLS is an additional mechanism.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Path to the TLS certificate file.
+    pub cert_path: PathBuf,
+
+    /// Path to the TLS private key file.
+    pub key_path: PathBuf,
+
+    /// Path to the CA certificate file for client certificate verification.
+    /// When `Some`, client certs signed by this CA are validated.
+    /// When `None`, the server does not request client certs.
+    #[serde(default)]
+    pub client_ca_path: Option<PathBuf>,
+
+    /// When `true` and `client_ca_path` is `Some`, the TLS handshake rejects
+    /// connections that do not present a valid client certificate.
+    /// When `false`, client certificates are accepted but not required.
+    #[serde(default)]
+    pub require_client_auth: bool,
+}
+
+/// OIDC (`OpenID` Connect) configuration for JWT-based authentication.
+///
+/// When configured, the server validates `authorization: Bearer <JWT>`
+/// headers on gRPC requests against the specified issuer's JWKS endpoint.
+///
+/// The roles claim path is configurable to support different providers:
+/// - Keycloak: `realm_access.roles` (default)
+/// - Entra ID / Okta: `roles`
+/// - Custom: any dot-separated path into the JWT claims
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcConfig {
+    /// OIDC issuer URL (e.g., `http://localhost:8180/realms/openshell`).
+    pub issuer: String,
+
+    /// Expected audience (`aud`) claim. Typically the OIDC client ID.
+    pub audience: String,
+
+    /// JWKS cache TTL in seconds. Defaults to 3600 (1 hour).
+    #[serde(default = "default_jwks_ttl_secs")]
+    pub jwks_ttl_secs: u64,
+
+    /// Dot-separated path to the roles array in the JWT claims.
+    /// Defaults to `realm_access.roles` (Keycloak).
+    /// Examples: `roles` (Entra ID), `groups` (Okta), `custom.path.roles`.
+    #[serde(default = "default_roles_claim")]
+    pub roles_claim: String,
+
+    /// Role name that grants admin access. Defaults to `openshell-admin`.
+    #[serde(default = "default_admin_role")]
+    pub admin_role: String,
+
+    /// Role name that grants standard user access. Defaults to `openshell-user`.
+    #[serde(default = "default_user_role")]
+    pub user_role: String,
+
+    /// Dot-separated path to the scopes value in the JWT claims.
+    /// When non-empty, the server enforces scope-based permissions on top of roles.
+    /// Keycloak: `scope` (space-delimited string). Okta: `scp` (JSON array).
+    #[serde(default)]
+    pub scopes_claim: String,
+}
+
+/// mTLS user authentication for local, single-user gateways.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MtlsAuthConfig {
+    /// When true, the gateway maps a verified TLS client certificate into a
+    /// user principal. Keep disabled for Kubernetes deployments because
+    /// Kubernetes sandbox pods and external users must not share user auth.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Gateway user authentication settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GatewayAuthConfig {
+    /// When true, unauthenticated user/CLI calls are accepted as a local
+    /// developer principal. This is an unsafe local-development escape hatch
+    /// for trusted, non-shared gateways. Sandbox supervisor calls still use
+    /// gateway-minted sandbox JWTs.
+    #[serde(default)]
+    pub allow_unauthenticated_users: bool,
+}
+
+const fn default_jwks_ttl_secs() -> u64 {
+    3600
+}
+
+/// Gateway-minted sandbox JWT configuration.
+///
+/// Points the gateway at the Ed25519 signing key (produced by `certgen`)
+/// and identifies the issuer string embedded in every minted token. The
+/// signing key never leaves the gateway process; the public key is loaded
+/// by the same gateway so it can validate its own tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayJwtConfig {
+    /// Path to the Ed25519 signing key (PKCS#8 PEM).
+    pub signing_key_path: PathBuf,
+    /// Path to the matching public key (SPKI PEM).
+    pub public_key_path: PathBuf,
+    /// Path to the `kid` value (plain text, one line).
+    pub kid_path: PathBuf,
+    /// Stable gateway identity embedded in `iss`/`aud`. Defaults to the
+    /// hostname-or-`openshell` placeholder if unset.
+    #[serde(default = "default_gateway_id")]
+    pub gateway_id: String,
+    /// Token lifetime in seconds. Defaults to 1 hour.
+    #[serde(default = "default_sandbox_token_ttl_secs")]
+    pub ttl_secs: u64,
+}
+
+fn default_gateway_id() -> String {
+    "openshell".to_string()
+}
+
+const fn default_sandbox_token_ttl_secs() -> u64 {
+    3_600
+}
+
+fn default_roles_claim() -> String {
+    "realm_access.roles".to_string()
+}
+
+fn default_admin_role() -> String {
+    "openshell-admin".to_string()
+}
+
+fn default_user_role() -> String {
+    "openshell-user".to_string()
+}
+
+impl Config {
+    /// Create a new config with optional TLS.
+    pub fn new(tls: Option<TlsConfig>) -> Self {
+        Self {
+            bind_address: default_bind_address(),
+            health_bind_address: None,
+            metrics_bind_address: None,
+            extra_bind_addresses: Vec::new(),
+            log_level: default_log_level(),
+            tls,
+            oidc: None,
+            auth: GatewayAuthConfig::default(),
+            mtls_auth: MtlsAuthConfig::default(),
+            gateway_jwt: None,
+            database_url: String::new(),
+            compute_drivers: vec![],
+            ssh_session_ttl_secs: default_ssh_session_ttl_secs(),
+            service_routing: ServiceRoutingConfig::default(),
+        }
+    }
+
+    /// Create a new configuration with the given bind address.
+    #[must_use]
+    pub const fn with_bind_address(mut self, addr: SocketAddr) -> Self {
+        self.bind_address = addr;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_health_bind_address(mut self, addr: SocketAddr) -> Self {
+        self.health_bind_address = Some(addr);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_metrics_bind_address(mut self, addr: SocketAddr) -> Self {
+        self.metrics_bind_address = Some(addr);
+        self
+    }
+
+    /// Append an extra listener address to the multiplex service.
+    ///
+    /// Duplicate entries (matching `bind_address` or any existing entry) are
+    /// silently dropped so callers can naively push driver-derived addresses
+    /// without checking for collisions.
+    #[must_use]
+    pub fn with_extra_bind_address(mut self, addr: SocketAddr) -> Self {
+        if addr != self.bind_address && !self.extra_bind_addresses.contains(&addr) {
+            self.extra_bind_addresses.push(addr);
+        }
+        self
+    }
+
+    /// Create a new configuration with the given log level.
+    #[must_use]
+    pub fn with_log_level(mut self, level: impl Into<String>) -> Self {
+        self.log_level = level.into();
+        self
+    }
+
+    /// Create a new configuration with a database URL.
+    #[must_use]
+    pub fn with_database_url(mut self, url: impl Into<String>) -> Self {
+        self.database_url = url.into();
+        self
+    }
+
+    /// Create a new configuration with the configured compute drivers.
+    #[must_use]
+    pub fn with_compute_drivers<I>(mut self, drivers: I) -> Self
+    where
+        I: IntoIterator<Item = ComputeDriverKind>,
+    {
+        self.compute_drivers = drivers.into_iter().collect();
+        self
+    }
+
+    /// Create a new configuration with the SSH session TTL.
+    #[must_use]
+    pub const fn with_ssh_session_ttl_secs(mut self, secs: u64) -> Self {
+        self.ssh_session_ttl_secs = secs;
+        self
+    }
+
+    /// Set the OIDC configuration for JWT-based authentication.
+    #[must_use]
+    pub fn with_oidc(mut self, oidc: OidcConfig) -> Self {
+        self.oidc = Some(oidc);
+        self
+    }
+
+    /// Derive browser-facing sandbox service domains from gateway server SANs.
+    ///
+    /// Wildcard DNS SANs such as `*.apps.example.com` enable service URLs
+    /// under `apps.example.com`. Non-wildcard DNS names and IP SANs do not
+    /// enable service subdomains.
+    #[must_use]
+    pub fn with_server_sans<I, S>(mut self, sans: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.service_routing.base_domains = service_routing_domains_from_server_sans(sans);
+        self
+    }
+
+    /// Enable or disable plaintext HTTP routing for loopback sandbox service
+    /// hostnames on TLS-enabled gateway listeners.
+    #[must_use]
+    pub const fn with_loopback_service_http(mut self, enabled: bool) -> Self {
+        self.service_routing.enable_loopback_service_http = enabled;
+        self
+    }
+}
+
+impl Default for ServiceRoutingConfig {
+    fn default() -> Self {
+        Self {
+            base_domains: default_service_routing_domains(),
+            enable_loopback_service_http: default_enable_loopback_service_http(),
+        }
+    }
+}
+
+fn default_bind_address() -> SocketAddr {
+    "127.0.0.1:17670".parse().expect("valid default address")
+}
+
+fn default_service_routing_domains() -> Vec<String> {
+    vec![DEFAULT_SERVICE_ROUTING_DOMAIN.to_string()]
+}
+
+const fn default_enable_loopback_service_http() -> bool {
+    true
+}
+
+fn service_routing_domains_from_server_sans<I, S>(sans: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut domains = Vec::new();
+    for san in sans {
+        if let Some(domain) = service_routing_domain_from_server_san(&san.into())
+            && !domains.contains(&domain)
+        {
+            domains.push(domain);
+        }
+    }
+    for domain in default_service_routing_domains() {
+        if !domains.contains(&domain) {
+            domains.push(domain);
+        }
+    }
+    domains
+}
+
+fn service_routing_domain_from_server_san(san: &str) -> Option<String> {
+    let san = san.trim().trim_matches('.').to_ascii_lowercase();
+    let domain = san.strip_prefix("*.")?;
+    normalize_service_routing_domain(domain)
+}
+
+fn normalize_service_routing_domain(domain: &str) -> Option<String> {
+    let domain = domain.trim().trim_matches('.');
+    if domain.is_empty() || domain.len() > 253 {
+        return None;
+    }
+    let labels = domain.split('.');
+    if labels.clone().any(|label| !is_dns_label(label)) {
+        return None;
+    }
+    Some(domain.to_string())
+}
+
+fn is_dns_label(label: &str) -> bool {
+    if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+        return false;
+    }
+    label
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+const fn default_ssh_session_ttl_secs() -> u64 {
+    86400 // 24 hours
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ComputeDriverKind, Config, DEFAULT_SERVICE_ROUTING_DOMAIN, detect_driver,
+        docker_host_unix_socket_path, is_unix_socket,
+    };
+    use std::net::SocketAddr;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+
+    #[test]
+    fn compute_driver_kind_parses_supported_values() {
+        assert_eq!(
+            "kubernetes".parse::<ComputeDriverKind>().unwrap(),
+            ComputeDriverKind::Kubernetes
+        );
+        assert_eq!(
+            "vm".parse::<ComputeDriverKind>().unwrap(),
+            ComputeDriverKind::Vm
+        );
+        assert_eq!(
+            "podman".parse::<ComputeDriverKind>().unwrap(),
+            ComputeDriverKind::Podman
+        );
+        assert_eq!(
+            "docker".parse::<ComputeDriverKind>().unwrap(),
+            ComputeDriverKind::Docker
+        );
+    }
+
+    #[test]
+    fn compute_driver_kind_rejects_unknown_values() {
+        let err = "firecracker".parse::<ComputeDriverKind>().unwrap_err();
+        assert!(err.contains("unsupported compute driver 'firecracker'"));
+    }
+
+    #[test]
+    fn config_defaults_to_loopback_bind_address() {
+        let expected: SocketAddr = "127.0.0.1:17670".parse().expect("valid address");
+        assert_eq!(Config::new(None).bind_address, expected);
+    }
+
+    #[test]
+    fn config_new_disables_health_bind_by_default() {
+        let cfg = Config::new(None);
+        assert!(cfg.health_bind_address.is_none());
+    }
+
+    #[test]
+    fn config_disables_unauthenticated_users_by_default() {
+        let cfg = Config::new(None);
+        assert!(!cfg.auth.allow_unauthenticated_users);
+    }
+
+    #[test]
+    fn service_routing_allows_loopback_plaintext_http_by_default() {
+        let cfg = Config::new(None);
+        assert_eq!(
+            cfg.service_routing.base_domains,
+            vec![DEFAULT_SERVICE_ROUTING_DOMAIN.to_string()]
+        );
+        assert!(cfg.service_routing.enable_loopback_service_http);
+    }
+
+    #[test]
+    fn server_sans_update_preserves_loopback_plaintext_http_flag() {
+        let cfg = Config::new(None)
+            .with_loopback_service_http(false)
+            .with_server_sans(["*.dev.openshell.localhost"]);
+
+        assert_eq!(
+            cfg.service_routing.base_domains,
+            vec![
+                "dev.openshell.localhost".to_string(),
+                DEFAULT_SERVICE_ROUTING_DOMAIN.to_string()
+            ]
+        );
+        assert!(!cfg.service_routing.enable_loopback_service_http);
+    }
+
+    #[test]
+    fn service_routing_domains_are_derived_from_wildcard_server_sans() {
+        let cfg = Config::new(None).with_server_sans([
+            "gateway.example.com",
+            "*.apps.example.com",
+            "127.0.0.1",
+            "*.apps.example.com",
+            "*.dev.example.com.",
+        ]);
+
+        assert_eq!(
+            cfg.service_routing.base_domains,
+            vec![
+                "apps.example.com".to_string(),
+                "dev.example.com".to_string(),
+                DEFAULT_SERVICE_ROUTING_DOMAIN.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn config_with_health_bind_address_sets_address() {
+        let addr: SocketAddr = "0.0.0.0:9090".parse().expect("valid address");
+        let cfg = Config::new(None).with_health_bind_address(addr);
+        assert_eq!(cfg.health_bind_address, Some(addr));
+    }
+
+    #[test]
+    fn detect_driver_returns_none_without_k8s_env_or_binaries() {
+        // When KUBERNETES_SERVICE_HOST is not set and no docker/podman binaries
+        // or Docker socket are available, detect_driver should return None.
+        // This test may pass or fail depending on the test environment,
+        // but it documents the expected behavior.
+        let _ = detect_driver(); // Returns Some or None based on environment
+    }
+
+    #[test]
+    fn docker_host_unix_socket_path_parses_unix_hosts() {
+        assert_eq!(
+            docker_host_unix_socket_path("unix:///var/run/docker.sock"),
+            Some(PathBuf::from("/var/run/docker.sock"))
+        );
+        assert_eq!(docker_host_unix_socket_path("tcp://127.0.0.1:2375"), None);
+        assert_eq!(docker_host_unix_socket_path("unix://"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_unix_socket_detects_socket_files() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let socket_path = temp_dir.path().join("docker.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        assert!(is_unix_socket(&socket_path));
+
+        let regular_file = temp_dir.path().join("not-a-socket");
+        std::fs::write(&regular_file, b"not a socket").expect("write regular file");
+        assert!(!is_unix_socket(&regular_file));
+    }
+
+    #[test]
+    #[allow(unsafe_code)] // std::env::set_var/remove_var require unsafe in Rust 2024
+    fn detect_driver_prefers_kubernetes_when_k8s_env_is_set() {
+        // Save the original env var
+        let original = std::env::var("KUBERNETES_SERVICE_HOST").ok();
+
+        // Set the env var
+        unsafe {
+            std::env::set_var("KUBERNETES_SERVICE_HOST", "127.0.0.1");
+        }
+
+        let result = detect_driver();
+        assert_eq!(result, Some(ComputeDriverKind::Kubernetes));
+
+        // Restore the original env var
+        unsafe {
+            match original {
+                Some(val) => std::env::set_var("KUBERNETES_SERVICE_HOST", val),
+                None => std::env::remove_var("KUBERNETES_SERVICE_HOST"),
+            }
+        }
+    }
+}

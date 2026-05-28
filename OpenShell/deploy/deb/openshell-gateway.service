@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenShell Gateway
+Documentation=https://github.com/NVIDIA/OpenShell
+After=default.target
+
+[Service]
+Type=simple
+StateDirectory=openshell/gateway
+EnvironmentFile=-%E/openshell/gateway.env
+ExecStartPre=/usr/bin/openshell-gateway generate-certs --output-dir %S/openshell/tls --server-san host.openshell.internal
+ExecStart=/usr/bin/openshell-gateway
+Restart=on-failure
+RestartSec=5s
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

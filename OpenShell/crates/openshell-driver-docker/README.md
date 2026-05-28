@@ -1,0 +1,85 @@
+# openshell-driver-docker
+
+Docker-backed compute driver for local OpenShell gateways.
+
+The driver manages sandbox containers through the local Docker daemon with the
+`bollard` client. It is intended for developer environments where Docker is
+already available and running Kubernetes would be unnecessary.
+
+## Runtime Model
+
+The gateway runs as a host process. The Docker driver creates one container per
+sandbox and starts the `openshell-sandbox` supervisor inside that container. The
+supervisor then creates the nested sandbox namespace for the agent process.
+
+Docker containers join an OpenShell-managed bridge network. The driver injects
+`host.openshell.internal` and `host.docker.internal` so supervisors have stable
+names for reaching the gateway host. On Docker Desktop, Colima, Rancher
+Desktop, OrbStack, and macOS-hosted gateways, those names use Docker's
+`host-gateway` alias. On native Linux Docker, the gateway also binds the bridge
+gateway IP so containers can call back to the host process.
+
+## Container Contract
+
+The driver-controlled container settings are part of the sandbox security
+contract:
+
+| Setting | Purpose |
+|---|---|
+| `user = "0"` | The supervisor needs root inside the container to prepare namespaces, mounts, Landlock, and seccomp. |
+| `network_mode = openshell` | Places the supervisor on the managed Docker bridge network. |
+| `cap_add` | Grants supervisor-only capabilities required for namespace setup and process inspection. |
+| `apparmor=unconfined` | Avoids Docker's default profile blocking required mount operations. |
+| `restart_policy = unless-stopped` | Keeps managed sandboxes resumable across daemon or gateway restarts. |
+| `PidsLimit` | Enforces the sandbox PID budget at the Docker cgroup layer. Set `[openshell.drivers.docker].sandbox_pids_limit = 0` to inherit the Docker/runtime default. |
+| CDI GPU request | Uses the sandbox `gpu_device` value when set; otherwise requests all NVIDIA GPUs when the sandbox spec asks for GPU support and daemon CDI support is detected. |
+
+The agent child process does not retain these supervisor privileges.
+
+## Supervisor Binary Resolution
+
+The Docker driver bind-mounts a host-side Linux `openshell-sandbox` binary into
+each sandbox container. Resolution order is:
+
+1. `supervisor_bin` in `[openshell.drivers.docker]`.
+2. A sibling `openshell-sandbox` next to the running `openshell-gateway` binary.
+3. A local Linux cargo target build for the Docker daemon architecture.
+4. `supervisor_image` in `[openshell.drivers.docker]`, or the
+   release-matched default supervisor image, extracting `/openshell-sandbox`.
+
+Release and Docker-image gateway builds bake the matching supervisor image tag
+into the binary at compile time. The default Docker supervisor image is not
+`:latest` unless a custom build explicitly sets that tag.
+
+## Callback and TLS
+
+`OPENSHELL_ENDPOINT` is injected from the gateway's configured gRPC endpoint.
+When no endpoint is configured, the driver uses
+`host.openshell.internal:<gateway-port>` with the appropriate HTTP or HTTPS
+scheme. Set `host_gateway_ip` only when the host has an explicit, locally
+assigned address that containers should use for callbacks; package-managed
+macOS gateways should leave it unset.
+
+For HTTPS endpoints, the server certificate must include the endpoint host as a
+subject alternative name. Docker sandboxes also need the client TLS bundle
+mounted into the container and exposed with:
+
+- `OPENSHELL_TLS_CA`
+- `OPENSHELL_TLS_CERT`
+- `OPENSHELL_TLS_KEY`
+
+HTTP endpoints reject TLS material because the supervisor would not use it.
+
+## Environment Ownership
+
+The driver merges template environment and sandbox spec environment first, then
+overwrites security-critical keys:
+
+- `OPENSHELL_ENDPOINT`
+- `OPENSHELL_SANDBOX_ID`
+- `OPENSHELL_SANDBOX`
+- `OPENSHELL_SSH_SOCKET_PATH`
+- `OPENSHELL_SANDBOX_COMMAND`
+- TLS path variables when HTTPS is enabled
+
+Do not allow sandbox images or templates to override these values.

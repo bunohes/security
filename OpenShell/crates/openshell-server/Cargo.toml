@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "openshell-server"
+description = "OpenShell gRPC/HTTP server with protocol multiplexing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "openshell-gateway"
+path = "src/main.rs"
+
+[dependencies]
+openshell-bootstrap = { path = "../openshell-bootstrap" }
+openshell-core = { path = "../openshell-core" }
+openshell-driver-docker = { path = "../openshell-driver-docker" }
+openshell-driver-kubernetes = { path = "../openshell-driver-kubernetes" }
+openshell-driver-podman = { path = "../openshell-driver-podman" }
+openshell-ocsf = { path = "../openshell-ocsf" }
+openshell-policy = { path = "../openshell-policy" }
+openshell-providers = { path = "../openshell-providers" }
+openshell-router = { path = "../openshell-router" }
+openshell-server-macros = { path = "../openshell-server-macros" }
+
+# Kubernetes client (used by the `generate-certs` subcommand)
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# gRPC
+tonic = { workspace = true, features = ["channel", "tls"] }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+# HTTP server
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true, features = ["client", "http1", "http2"] }
+http = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true }
+
+# TLS
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Error handling
+miette = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Metrics
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+# Utilities
+futures = { workspace = true }
+bytes = { workspace = true }
+pin-project-lite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio-stream = { workspace = true }
+sqlx = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+hmac = "0.12"
+sha2 = { workspace = true }
+jsonwebtoken = { workspace = true }
+async-trait = "0.1"
+url = { workspace = true }
+hex = "0.4"
+russh = "0.57"
+rand = { workspace = true }
+petname = "2"
+ipnet = "2"
+tempfile = "3"
+rustix = { workspace = true }
+x509-parser = "0.16"
+
+[features]
+dev-settings = ["openshell-core/dev-settings"]
+test-support = []
+
+[dev-dependencies]
+hyper-rustls = { version = "0.27", default-features = false, features = ["native-tokio", "http1", "tls12", "logging", "ring", "webpki-tokio"] }
+rcgen = { version = "0.13", features = ["crypto", "pem"] }
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
+wiremock = "0.6"
+
+[lints]
+workspace = true
