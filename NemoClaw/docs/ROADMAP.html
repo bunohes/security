@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NemoClaw 보안 모듈 개발 로드맵</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', 'Noto Sans KR', sans-serif;
+    background: #ffffff;
+    color: #1f2328;
+    padding: 48px 56px;
+    min-width: 1400px;
+  }
+
+  h1 {
+    font-size: 26px;
+    font-weight: 700;
+    color: #1a7f37;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #57606a;
+    margin-bottom: 40px;
+    letter-spacing: 0.02em;
+  }
+
+  /* ── TIMELINE HEADER ── */
+  .timeline-header {
+    display: grid;
+    grid-template-columns: 140px repeat(10, 1fr);
+    gap: 0;
+    margin-bottom: 0;
+  }
+  .timeline-header .label-cell { /* empty corner */ }
+  .week-label {
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: #57606a;
+    padding: 6px 0 10px;
+    border-bottom: 1px solid #d0d7de;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  /* ── PHASE ROWS ── */
+  .phase-block {
+    display: grid;
+    grid-template-columns: 140px repeat(10, 1fr);
+    gap: 0;
+    margin-bottom: 2px;
+  }
+
+  .phase-label {
+    display: flex;
+    align-items: flex-start;
+    padding: 16px 14px 0 0;
+    font-size: 11px;
+    font-weight: 700;
+    color: #57606a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    justify-content: flex-end;
+    text-align: right;
+    line-height: 1.4;
+  }
+
+  .phase-body {
+    padding: 10px 0 10px;
+    position: relative;
+  }
+
+  /* bar spans multiple columns via grid-column */
+  .bar-wrap {
+    grid-column: var(--start) / var(--end);
+    padding: 8px 6px;
+  }
+
+  .bar {
+    border-radius: 8px;
+    padding: 12px 16px;
+    position: relative;
+  }
+
+  .bar-p1 { background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%); border: 1px solid #93c5fd; }
+  .bar-p2 { background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border: 1px solid #86efac; }
+  .bar-p3 { background: linear-gradient(135deg, #fef9c3 0%, #fef08a 100%); border: 1px solid #fde047; }
+  .bar-p4 { background: linear-gradient(135deg, #ffe4e6 0%, #fecdd3 100%); border: 1px solid #fda4af; }
+
+  .bar-title {
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    letter-spacing: 0.03em;
+  }
+  .bar-p1 .bar-title { color: #1d4ed8; }
+  .bar-p2 .bar-title { color: #15803d; }
+  .bar-p3 .bar-title { color: #a16207; }
+  .bar-p4 .bar-title { color: #be123c; }
+
+  .bar-weeks {
+    font-size: 10px;
+    color: #57606a;
+    margin-bottom: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  /* ── TASK ROWS per phase ── */
+  .task-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .task-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .member-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    font-size: 11px;
+    font-weight: 800;
+    flex-shrink: 0;
+    letter-spacing: 0;
+  }
+  .badge-a { background: #dbeafe; color: #1d4ed8; border: 1.5px solid #93c5fd; }
+  .badge-b { background: #dcfce7; color: #15803d; border: 1.5px solid #86efac; }
+  .badge-c { background: #fef9c3; color: #a16207; border: 1.5px solid #fde047; }
+  .badge-d { background: #ffe4e6; color: #be123c; border: 1.5px solid #fda4af; }
+
+  .task-text {
+    font-size: 11.5px;
+    color: #1f2328;
+    line-height: 1.35;
+  }
+
+  /* ── CONNECTOR GRID (week grid lines) ── */
+  .grid-area {
+    display: grid;
+    grid-template-columns: 140px repeat(10, 1fr);
+    position: relative;
+  }
+
+  .grid-col-lines {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: repeat(10, 1fr);
+    position: absolute;
+    top: 0; left: 140px; right: 0; bottom: 0;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .grid-col-line {
+    border-left: 1px dashed #d0d7de;
+  }
+
+  /* ── FULL LAYOUT ── */
+  .layout {
+    position: relative;
+  }
+
+  .phases-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .phase-row {
+    display: grid;
+    grid-template-columns: 140px repeat(10, 1fr);
+    position: relative;
+    border-bottom: 1px solid #eaeef2;
+  }
+  .phase-row:last-child { border-bottom: none; }
+
+  .phase-meta {
+    padding: 20px 14px 20px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: flex-start;
+    border-right: 1px solid #d0d7de;
+  }
+  .phase-num {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #57606a;
+    margin-bottom: 3px;
+  }
+  .phase-name {
+    font-size: 12px;
+    font-weight: 700;
+    text-align: right;
+    line-height: 1.4;
+  }
+  .phase-name-p1 { color: #1d4ed8; }
+  .phase-name-p2 { color: #15803d; }
+  .phase-name-p3 { color: #a16207; }
+  .phase-name-p4 { color: #be123c; }
+  .phase-dur {
+    font-size: 10px;
+    color: #57606a;
+    margin-top: 4px;
+    text-align: right;
+  }
+
+  .phase-content {
+    padding: 14px 10px 14px 12px;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* bar that spans weeks */
+  .week-bar {
+    position: absolute;
+    top: 14px;
+    border-radius: 6px;
+    height: calc(100% - 28px);
+    opacity: 0.12;
+    z-index: 0;
+  }
+  .week-bar-p1 { background: #1d4ed8; }
+  .week-bar-p2 { background: #15803d; }
+  .week-bar-p3 { background: #a16207; }
+  .week-bar-p4 { background: #be123c; }
+
+  /* ── LEGEND ── */
+  .legend {
+    display: flex;
+    gap: 24px;
+    margin-top: 32px;
+    padding: 16px 20px;
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    flex-wrap: wrap;
+  }
+  .legend-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #57606a;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-right: 8px;
+    align-self: center;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #1f2328;
+  }
+
+  /* ── MILESTONE DIAMONDS ── */
+  .milestone-row {
+    display: grid;
+    grid-template-columns: 140px repeat(10, 1fr);
+    margin-top: 18px;
+    margin-bottom: 4px;
+  }
+  .milestone-cell {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .milestone {
+    width: 10px;
+    height: 10px;
+    background: #f0883e;
+    transform: rotate(45deg);
+    border: 1.5px solid #a16207;
+  }
+  .milestone-label {
+    font-size: 9.5px;
+    color: #57606a;
+    text-align: center;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+
+<h1>NemoClaw OpenShell 보안 모듈 개발 로드맵</h1>
+<div class="subtitle">버전 1.0 &nbsp;·&nbsp; 2026-05-19 &nbsp;·&nbsp; 총 10주 · 4팀원</div>
+
+<!-- Week header -->
+<div style="display:grid; grid-template-columns: 140px repeat(10,1fr); margin-bottom:0; border-bottom: 1px solid #d0d7de; padding-bottom:10px;">
+  <div></div>
+  <div class="week-label">Week 1</div>
+  <div class="week-label">Week 2</div>
+  <div class="week-label">Week 3</div>
+  <div class="week-label">Week 4</div>
+  <div class="week-label">Week 5</div>
+  <div class="week-label">Week 6</div>
+  <div class="week-label">Week 7</div>
+  <div class="week-label">Week 8</div>
+  <div class="week-label">Week 9</div>
+  <div class="week-label">Week 10</div>
+</div>
+
+<!-- ── PHASE 1 ── -->
+<div style="display:grid; grid-template-columns: 140px repeat(10,1fr); border-bottom:1px solid #d0d7de; padding: 18px 0;">
+  <div class="phase-meta">
+    <div class="phase-num">Phase 1</div>
+    <div class="phase-name phase-name-p1">기반<br>설계</div>
+    <div class="phase-dur">Week 1–2</div>
+  </div>
+  <!-- bar: week 1–2 = col 2–4 -->
+  <div style="grid-column:2/4; padding:0 8px; display:flex; align-items:center;">
+    <div class="bar bar-p1" style="width:100%; min-height:120px;">
+      <div class="bar-weeks">WEEK 1 – 2</div>
+      <div class="task-grid">
+        <div class="task-row"><span class="member-badge badge-a">A</span><span class="task-text">SSRF 인터페이스 · CIDR 목록 구조 확정</span></div>
+        <div class="task-row"><span class="member-badge badge-b">B</span><span class="task-text">시크릿 패턴 카탈로그 · 리댁션 API 설계</span></div>
+        <div class="task-row"><span class="member-badge badge-c">C</span><span class="task-text">컨테이너 아키텍처 · 사용자 모델 설계</span></div>
+        <div class="task-row"><span class="member-badge badge-d">D</span><span class="task-text">정책 YAML 스키마 v1 · 티어 정의 문서</span></div>
+      </div>
+    </div>
+  </div>
+  <div style="grid-column:4/12;"></div>
+</div>
+
+<!-- ── PHASE 2 ── -->
+<div style="display:grid; grid-template-columns: 140px repeat(10,1fr); border-bottom:1px solid #d0d7de; padding: 18px 0;">
+  <div class="phase-meta">
+    <div class="phase-num">Phase 2</div>
+    <div class="phase-name phase-name-p2">핵심 모듈<br>구현</div>
+    <div class="phase-dur">Week 3–5</div>
+  </div>
+  <div style="grid-column:2/4;"></div>
+  <!-- bar: week 3–5 = col 4–7 -->
+  <div style="grid-column:4/7; padding:0 8px; display:flex; align-items:center;">
+    <div class="bar bar-p2" style="width:100%; min-height:120px;">
+      <div class="bar-weeks">WEEK 3 – 5</div>
+      <div class="task-grid">
+        <div class="task-row"><span class="member-badge badge-a">A</span><span class="task-text">ssrf-validator · private-networks · proxy-enforcer</span></div>
+        <div class="task-row"><span class="member-badge badge-b">B</span><span class="task-text">secret-patterns · redact · credential-filter · hash</span></div>
+        <div class="task-row"><span class="member-badge badge-c">C</span><span class="task-text">Dockerfile.base · preflight · capability-drop</span></div>
+        <div class="task-row"><span class="member-badge badge-d">D</span><span class="task-text">policy-engine · 기본 정책 YAML · 프리셋 9종</span></div>
+      </div>
+    </div>
+  </div>
+  <div style="grid-column:7/12;"></div>
+</div>
+
+<!-- ── PHASE 3 ── -->
+<div style="display:grid; grid-template-columns: 140px repeat(10,1fr); border-bottom:1px solid #d0d7de; padding: 18px 0;">
+  <div class="phase-meta">
+    <div class="phase-num">Phase 3</div>
+    <div class="phase-name phase-name-p3">통합 &<br>고급 기능</div>
+    <div class="phase-dur">Week 6–7</div>
+  </div>
+  <div style="grid-column:2/7;"></div>
+  <!-- bar: week 6–7 = col 7–9 -->
+  <div style="grid-column:7/9; padding:0 8px; display:flex; align-items:center;">
+    <div class="bar bar-p3" style="width:100%; min-height:120px;">
+      <div class="bar-weeks">WEEK 6 – 7</div>
+      <div class="task-grid">
+        <div class="task-row"><span class="member-badge badge-a">A</span><span class="task-text">CLI ↔ 플러그인 parity 테스트 · DNS 리바인딩</span></div>
+        <div class="task-row"><span class="member-badge badge-b">B</span><span class="task-text">secret-scanner · 스트림 리댁션 통합</span></div>
+        <div class="task-row"><span class="member-badge badge-c">C</span><span class="task-text">런타임 Dockerfile · Landlock 통합</span></div>
+        <div class="task-row"><span class="member-badge badge-d">D</span><span class="task-text">snapshot-security · initial-policy · tiers 완성</span></div>
+      </div>
+    </div>
+  </div>
+  <div style="grid-column:9/12;"></div>
+</div>
+
+<!-- ── PHASE 4 ── -->
+<div style="display:grid; grid-template-columns: 140px repeat(10,1fr); padding: 18px 0;">
+  <div class="phase-meta">
+    <div class="phase-num">Phase 4</div>
+    <div class="phase-name phase-name-p4">테스트 ·<br>감사 · 릴리스</div>
+    <div class="phase-dur">Week 8–10</div>
+  </div>
+  <div style="grid-column:2/9;"></div>
+  <!-- bar: week 8–10 = col 9–12 -->
+  <div style="grid-column:9/12; padding:0 8px; display:flex; align-items:center;">
+    <div class="bar bar-p4" style="width:100%; min-height:120px;">
+      <div class="bar-weeks">WEEK 8 – 10</div>
+      <div class="task-grid">
+        <div class="task-row"><span class="member-badge badge-a">A</span><span class="task-text" style="color:#1f2328">크로스팀 보안 리뷰</span></div>
+        <div class="task-row"><span class="member-badge badge-b">B</span><span class="task-text" style="color:#1f2328">커버리지 임계값 달성</span></div>
+        <div class="task-row"><span class="member-badge badge-c">C</span><span class="task-text" style="color:#1f2328">침투 테스트 시나리오</span></div>
+        <div class="task-row"><span class="member-badge badge-d">D</span><span class="task-text" style="color:#1f2328">문서화 · CHANGELOG · 릴리스 태그</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── DELIVERABLES ROW ── -->
+<div style="display:grid; grid-template-columns: 140px repeat(10,1fr); margin-top:14px; padding-top:14px; border-top:1px dashed #d0d7de;">
+  <div style="padding-right:14px; text-align:right; font-size:10px; font-weight:700; color:#8b949e; text-transform:uppercase; letter-spacing:0.08em; padding-top:6px;">산출물</div>
+  <!-- Week 2 end -->
+  <div style="grid-column:3/4; display:flex; flex-direction:column; align-items:center; gap:4px;">
+    <div style="width:10px;height:10px;background:#1d4ed8;transform:rotate(45deg);border:1.5px solid #1d4ed8;flex-shrink:0;"></div>
+    <div style="font-size:9.5px;color:#1d4ed8;text-align:center;line-height:1.3;">인터페이스<br>합의 완료</div>
+  </div>
+  <div style="grid-column:4/7;"></div>
+  <!-- Week 5 end -->
+  <div style="grid-column:7/8; display:flex; flex-direction:column; align-items:center; gap:4px;">
+    <div style="width:10px;height:10px;background:#15803d;transform:rotate(45deg);border:1.5px solid #15803d;flex-shrink:0;"></div>
+    <div style="font-size:9.5px;color:#15803d;text-align:center;line-height:1.3;">핵심 모듈<br>구현 완료</div>
+  </div>
+  <div style="grid-column:7/9;"></div>
+  <!-- Week 7 end -->
+  <div style="grid-column:9/10; display:flex; flex-direction:column; align-items:center; gap:4px;">
+    <div style="width:10px;height:10px;background:#a16207;transform:rotate(45deg);border:1.5px solid #a16207;flex-shrink:0;"></div>
+    <div style="font-size:9.5px;color:#a16207;text-align:center;line-height:1.3;">통합 &<br>검증 완료</div>
+  </div>
+  <!-- Week 10 end -->
+  <div style="grid-column:12/13; display:flex; flex-direction:column; align-items:center; gap:4px;">
+    <div style="width:10px;height:10px;background:#be123c;transform:rotate(45deg);border:1.5px solid #be123c;flex-shrink:0;"></div>
+    <div style="font-size:9.5px;color:#be123c;text-align:center;line-height:1.3;">보안 감사<br>릴리스</div>
+  </div>
+</div>
+
+<!-- ── LEGEND ── -->
+<div class="legend">
+  <span class="legend-title">팀원</span>
+  <div class="legend-item"><span class="member-badge badge-a">A</span> 네트워크 보안 (SSRF · 프록시)</div>
+  <div class="legend-item"><span class="member-badge badge-b">B</span> 자격증명 보안 (시크릿 · 리댁션)</div>
+  <div class="legend-item"><span class="member-badge badge-c">C</span> 컨테이너 보안 (Docker · Landlock)</div>
+  <div class="legend-item"><span class="member-badge badge-d">D</span> 정책 &amp; 통합 (네트워크 정책 · 스냅샷)</div>
+</div>
+
+</body>
+</html>
